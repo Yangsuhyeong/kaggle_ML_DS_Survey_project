@@ -1,0 +1,464 @@
+---
+title: "Salary"
+author: "Yang Su Hyeong"
+date: '2020 6 12 '
+output: html_document
+---
+
+```{r prepare, include=TRUE, message=FALSE}
+library(ggplot2)
+library(scales)
+library(gridExtra)
+library(grid)
+library(corrplot)
+library(RColorBrewer)
+
+# data manipulation 
+library(dplyr); library(readr); library(data.table)
+library(forcats) ## factor manipulation 
+library(stringr); library(tidyr); library(tibble)
+library(lazyeval); library(broom); library(purrr)
+library(reshape2); library(rlang)
+
+#library(ggrepel); library(ggforce); library(ggridges)
+library(countrycode); library(geofacet); library(highcharter)
+library(plotly)
+
+## code start : 
+path <- "D:/project/ML_DS/"
+
+multiple <- read_csv("D:/project/ML_DS/multipleChoiceResponses.csv", na=character()) %>%
+  slice(2:n()) %>%
+  rename("duration" = `Time from Start to Finish (seconds)`)
+
+```
+
+## 1. Duration outlier 제거하기 : 
+```{r salary, include=TRUE, message=FALSE}
+##Preprocessing
+## 1. Country - 5개 대륙으로 나눔. done 
+## 2. Salary - 결측치 제거하지 않음. 극단적인 이상치만 제거.  done
+## 3. Student - 다 넣고 진행함. (salary no selection이 많음.)  
+## 4. 변수 내 grouping 필요 - ML 총 5개로 재분류 필요. 
+## DS, DA, Others, Software Engineer, Student 
+## 복수 응답지 남기고 나머지 제거. done
+## Student : 살리기. 
+## Confidence NA : 제거할 것. done
+## Duration Time : 제거에만 활용. done 
+
+vars <- c(gender = "Q1",
+          country = "Q3", 
+          degree = "Q4",
+          Role = "Q6", 
+          Age = "Q2", 
+          undergraduate_major = "Q5", 
+          industry = "Q7", 
+          Experience = "Q8", 
+          value = "Q9",
+          confidence = "Q26")
+
+multiple <- multiple %>% rename(!!vars)
+
+multiple$duration <- as.numeric(multiple$duration)
+
+## 필요없는 변수 제거 - 복스응답, 분석에 관계 없는 변수 제거하기 
+multiple <- multiple %>%
+  select(-contains("OTHER_TEXT")) %>%
+  select(-contains("Q33")) %>%
+  select(-contains("Q39")) %>%
+  select(-c("Q17", "Q18","Q20", "Q22", "Q32", "Q37", "Q12_MULTIPLE_CHOICE"))
+
+## Duration : 너무 적은 시간 or 너무 오래 걸린 사람들 제거. 
+summary(multiple$duration/60.)
+
+multiple %>% 
+  mutate(duration = duration/60.) %>%
+  select(c(duration)) %>%
+  ggplot(aes(log(duration,10))) + geom_histogram(bins = 60, alpha=0.6, position = "identity") +
+  ggtitle("Duration of survey, log_scaled")
+
+## 4000 분(10^3 * 4) 이상 제거, 3분 이하 체거?? 
+
+multiple %>% 
+  mutate(duration = duration/60.) %>%
+  filter(duration < 4000) %>%
+  filter(duration > 4) %>%
+  select(c(duration)) %>%
+  ggplot(aes(duration)) + geom_histogram(bins = 60, alpha=0.6, position = "identity") +
+  ggtitle("Duration of survey")
+
+multiple %>% 
+  mutate(duration = duration/60.) %>%
+  filter(duration < 4000) %>%
+  filter(duration > 4) %>%
+  select(c(duration)) %>%
+  ggplot(aes(log(duration, 10),)) + geom_histogram(bins = 60, alpha=0.6, position = "identity") +
+  ggtitle("Duration of survey, log_scaled, and drop more than 4000 min, less then 4 min")
+
+sort(multiple$duration/60., decreasing = TRUE)[1:150]
+
+sum((multiple$duration/60. > 4000)) ## 263개 
+sum((multiple$duration/60. < 4)) ## 2592개 
+
+multiple[multiple$duration/60. < 3, 11:25]
+tail(multiple[multiple$duration/60. < 3, 11:25])
+## 2592개
+## 대체로 NA가 많음.
+
+multiple[multiple$duration/60. < 4, 300:310]
+multiple[multiple$duration/60. < 4, 12:25]
+## 역시 초반은 괜찮다. 
+tail(multiple[multiple$duration/60. < 4, 12:25])
+tail(multiple[multiple$duration/60. < 4, 300:310])
+tail(multiple[multiple$duration/60. < 4, 210:230])
+## No data available 
+
+multiple[multiple$duration/60. > 4000, 11:25]
+tail(multiple[multiple$duration/60. > 4000, 11:25])
+## 의외로 초반 data는 제대로 만들어져있음. 
+
+multiple[multiple$duration/60. > 4000, 300:310]
+tail(multiple[multiple$duration/60. > 4000, c(300:310)])
+tail(multiple[multiple$duration/60. > 4000, c(314:330)])
+
+## 3rd Quantile ~ maximum
+multiple %>% 
+  mutate(duration = duration/60.) %>%
+  filter(duration > 4000) %>%
+  select(c(duration)) %>%
+  ggplot(aes(log(duration,10),)) + geom_histogram(bins = 60, alpha=0.6, position = "identity") +
+  ggtitle("Duration of survey")
+```
+
+4000분 이상인 데이터만 따로 잘라서 확인해 본 결과. 자르기로 결정! 4분 이하, 4000분 이상 데이터는 전부 잘랐다. 
+
+## 2. Confidence = NA 제거하기 
+```{r confidenc, include=TRUE, message=FALSE}
+## 4분 이하, 600분 이상 제거시 ?? 
+multiple <- multiple %>%
+  filter(duration/60. < 4000) %>%
+  filter(duration/60. > 4)
+
+## Confidence 
+na_conf <- which(multiple$confidence=="") ## 2093개 
+
+multiple %>% 
+  mutate(duration = duration/60., 
+         conf_NA = as.factor(ifelse(multiple$confidence == "", 1, 0))) %>%
+  select(c(duration, confidence, conf_NA)) %>%
+  ggplot(aes(log(duration,10), fill = conf_NA)) + geom_histogram(bins = 60, alpha=0.6,
+                                                           position = "identity") +
+  ggtitle("Duration of survey for Confidence = NA vs Confidence available duration")
+## 1500 분 (25시간) 이상 : strange value. 
+## 초반 4~5분 : Strange value. 너무 짧은 시간 내에 응답을 마쳤다. 
+
+multiple_p <- multiple %>% 
+  filter(!multiple$confidence=="")
+```
+
+Confidence = NA 인 개체들이 너무 설문조사 시간이 짧다. 그래서 Confidence = 26번 문제까지 응답을 안했으며, 그 뒤의 값들도 많이 누락되어있어, 전체 제거하기로 결정. 
+
+## 3. Salary = NA 제거하기 
+
+```{r salary_outlier, include=TRUE, message=FALSE}
+## Salary 이상치 : 
+
+summary(multiple_p$value)
+multiple_p$value[multiple_p$value==""] <- "No selection"
+multiple_p[1:10, c("value")]
+
+salary_buckets <- c("0-10,000", "10-20,000", "20-30,000", "30-40,000", "40-50,000", 
+                    "50-60,000", "60-70,000", "70-80,000", "80-90,000", "90-100,000", 
+                    "100-125,000", "125-150,000", "150-200,000", "200-250,000", "250-300,000", 
+                    "300-400,000", "400-500,000", "500,000+", 
+                    "I do not wish to disclose my approximate yearly compensation", "No selection")
+
+multiple_p$value <- factor(multiple_p$value, levels = salary_buckets)
+summary(multiple_p$value)
+
+na_salary <- which(multiple_p$value == "No selection") ## 1435개 
+
+multiple_p %>% 
+  mutate(duration = duration/60., 
+         salary_NA = as.factor(ifelse(value == "No selection", 1, 0))) %>%
+  select(c(duration, value, salary_NA)) %>%
+  ggplot(aes(log(duration,10), fill = salary_NA)) + geom_histogram(bins = 60, alpha=0.6,
+                                                         position = "identity") +
+  ggtitle("Duration of survey for salary = NA vs salary available duration")
+
+summary(multiple_p[na_salary, 'duration'])
+## 제거하지 않고 No selection -> do not want to disclose에 합치기. 
+
+multiple_p$value[multiple_p$value=="No selection"] <- "I do not wish to disclose my approximate yearly compensation"
+multiple_p$value <- factor(multiple_p$value, levels = salary_buckets[-20])
+summary(multiple_p$value)
+
+## 아마 상위 20%로 구간 나눠서 fitting 해야 할지도. 
+multiple_p %>% 
+  mutate(duration = duration/60., 
+         disclose = as.factor(ifelse(value == "I do not wish to disclose my approximate yearly compensation", 1, 0))) %>%
+  select(c(duration, value, disclose)) %>%
+  ggplot(aes(log(duration, 10), fill = disclose)) + geom_histogram(bins = 60, alpha=0.6,
+                                                           position = "identity") +
+  ggtitle("Duration of survey for Salary = do not want to disclose vs Salary = Available")
+
+```
+
+No Selection(NA) 값들이 너무 duration pattern과 비슷해서, 일단은 No selection과 I do not want to disclose를 합치고, 차후 fitting 과정에서 필요할 경우 제거하기로 한다.
+
+## 4. Country : 5대륙으로 합치기. 
+
+```{r country, include=TRUE, message=FALSE}
+## Country = NA ? 
+sum(multiple_p$country=="") #NA 없어짐. 
+
+asia <- c("Bangladesh","China","Hong Kong (S.A.R.)","India","Indonesia","Iran, Islamic Republic of...","Israel",
+          "Japan","Malaysia","Pakistan","Philippines","Republic of Korea","Singapore","South Korea","Thailand",
+          "Turkey","Viet Nam")
+europe <- c("Austria","Belarus","Belgium","Czech Republic","Denmark","Finland","France","Germany","Greece",
+            "Hungary","Ireland","Italy","Netherlands","Norway","Poland","Portugal","Romania","Russia","Spain",
+            "Sweden","Switzerland","Ukraine","United Kingdom of Great Britain and Northern Ireland")
+southamerica <- c("Argentina","Brazil","Chile","Colombia","Peru")
+northamerica <- c("Canada","Mexico","United States of America")
+oceania <- c("Australia","New Zealand")
+africa <- c("Egypt","Kenya","Morocco","Nigeria","South Africa","Tunisia")
+
+asia.idx <- which(multiple_p$country %in% asia)
+europe.idx <- which(multiple_p$country %in% europe)
+southame.idx <- which(multiple_p$country %in% southamerica)
+northame.idx <- which(multiple_p$country %in% northamerica)
+oceania.idx <- which(multiple_p$country %in% oceania)
+africa.idx <- which(multiple_p$country %in% africa)
+region <- rep(NA,nrow(multiple_p))
+region[asia.idx] <- "Asia"
+region[europe.idx] <- "Europe"
+region[southame.idx] <- "SouthAmerica"
+region[northame.idx] <- "NorthAmerica"
+region[oceania.idx] <- "Oceania"
+region[africa.idx] <- "Africa"
+multiple_p$country <- factor(region)
+
+table(multiple_p$country)/sum(table(multiple_p$country))
+```
+
+
+## 5. Student 합쳐주기 : Role = Student와 Industry = Student 합쳐주기. 
+
+```{r student, include=TRUE, message=FALSE}
+## Student 살리기 : 
+## 3. Student - 넣고 진행함. (salary no selection이 많음.)  
+
+table(multiple_p$Role); table(multiple_p$industry)
+
+std.id <- unique(c(which(multiple_p$Role == "Student"), which(multiple_p$industry == "I am a student"))) ## 4189
+sort(std.id, decreasing = TRUE)[1:10]
+
+table(multiple_p[std.id, "value"])
+## total = 4189, 1858 choosed do not want to disclose yearly compensation. 
+
+multiple_p[std.id, "Role"] <- "Student"
+multiple_p[std.id, "industry"] <- "Student"
+```
+
+## 6. Degree = I Prefer not to answer = 제거해주기. 
+
+```{r degree_na, include=TRUE}
+#Degree = NA 없어짐 
+sum(multiple_p$degree=="")
+sum(multiple_p$degree=="I prefer not to answer") ## 178개 
+
+## drop I prefer not to answer 
+multiple_p %>% 
+  select(degree, duration, value, Role, industry) %>%
+  filter(degree == "I prefer not to answer") %>%
+  group_by(value) %>% count() %>%
+  ggplot(aes(x=value, y=n, fill=value)) + geom_bar(stat="identity") + 
+  labs(x="", title = "Degree=Do not want to answer people's value")
+## 압도적으로 value도 응답 없음이 많다. 제거! 
+```
+
+Valeu 응답없음이 너무 많은 class이므로 삭제하기로 한다. 
+
+### 6-1) Degree = Not Answer 사람들의 이상한 패턴 : 
+```{r degree_strange, include=TRUE, message=FALSE}
+multiple_p %>% 
+  select(degree, duration, value, Role, industry) %>%
+  filter(degree == "I prefer not to answer") %>%
+  filter(!Role == "Student") %>%
+  group_by(value) %>% count() %>%
+  ggplot(aes(x=value, y=n, fill=value)) + geom_bar(stat="identity") + 
+  labs(x="", title = "Degree=Do not want to answer people's value, without students")
+## 초반부 조금 상승, No yearly compensation 변함 없음. 거의 Sofware Engineers. why??
+
+multiple_p %>% 
+  select(degree, duration, value, Role, industry) %>%
+  filter(degree == "I prefer not to answer") %>%
+  group_by(industry) %>% count() %>%
+  ggplot(aes(x=industry, y=n, fill=industry)) + geom_bar(stat="identity") + 
+  labs(x="", title = "Degree=Do not want to answer people's industry")
+## computer/tech가 대부분
+## => 신기한 패턴! computer science 쪽의 178명은 자신의 학력을 기재하지 않음. 
+
+multiple_p %>% 
+  select(degree, duration, value, Role, industry) %>%
+  filter(degree == "I prefer not to answer") %>%
+  group_by(Role) %>% count() %>%
+  ggplot(aes(x=Role, y=n, fill=Role)) + geom_bar(stat="identity") + 
+  labs(x="", title = "Degree=Do not want to answer people's Role/Job")
+## 거의 software engineer 
+
+multiple_p %>% 
+  select(value) %>%
+  group_by(value) %>% count() %>%
+  ggplot(aes(x=value, y=n, fill=value)) + geom_bar(stat="identity") + 
+  labs(x="", title = "Value dist")
+
+## Total distribution, do not want to disclose가 너무 많음. 
+
+multiple_p <- multiple_p %>%
+  filter(!degree == "I prefer not to answer")
+```
+
+=> Degree = 밝히지 않고 싶어하는 사람들의 다수가 Software Engineer였다. 
+
+## 7. Role - Class 묶기. 
+
+```{r Role, include=TRUE, message=FALSE}
+## 4. 변수 내 grouping 필요 - ML 총 5개로 재분류 필요. / DS, DA, Software Engineer, Others, Student 
+## ## DS, DA, Others, Software Engineer, Student 
+## Ds : DS, DA = BA + DA + 
+## Software Engineer : SE + DBA/Database Engineer 
+## overfitting경계를 위해서 총 5% 미만의 개체 응답 수는 제거. 
+## Remove not employed 
+
+table(multiple_p$Role)
+
+# not empolyed 제거
+multiple_p <- multiple_p %>%
+  filter(!Role == "Not employed")
+
+## DBA/Database Engineer+Data Engineer summation. 
+multiple_p[which(multiple_p$Role == "DBA/Database Engineer"), "Role"] <- 'Data Engineer/DBA'
+multiple_p[which(multiple_p$Role == "Data Engineer"), "Role"] <- 'Data Engineer/DBA'
+
+## Statistician + Research Scientist 합치기 
+multiple_p[which(multiple_p$Role == "Statistician"), "Role"] <- 'Statistician/Research Scientist'
+multiple_p[which(multiple_p$Role == "Research Scientist"), "Role"] <- 'Statistician/Research Scientist'
+## Sales person 제거
+multiple_p[which(multiple_p$Role == "Salesperson"), "Role"] <- 'Others'
+
+table(multiple_p[multiple_p$Role == "Research Assistant","value"])
+table(multiple_p[multiple_p$Role == "Student","value"])
+## Research_Assisent = 연구보조원. 연구실에서 일하는 직종! 
+## Ds = Ds
+table(multiple_p[multiple_p$Role == "Research Assistant","degree"])
+table(multiple_p[multiple_p$Role == "Student","degree"])
+## 사실상 phd. 연구원. modtly, Doctoral, and Master's degree 
+## Students로 넣어야 하나? Yes 
+
+multiple_p[which(multiple_p$Role == "Research Assistant"), "Role"] <- 'Student'
+table(multiple_p$Role)
+
+## Principal Investigator ; 주로 교수님. 책임연구원. 
+table(multiple_p[multiple_p$Role == "Principal Investigator","degree"])
+## 대부분 Doctor's degree. 
+table(multiple_p[multiple_p$Role == "Principal Investigator","value"])
+## 다만, 패턴이 학생과는 다름. 어디에 넣지.... 
+table(multiple_p[multiple_p$Role == "Principal Investigator","industry"])
+
+## drop data journalist, 
+c(table(multiple_p[multiple_p$Role == "Marketing Analyst", "value"]), table(multiple_p[multiple_p$Role == "Business Analyst", "value"]))
+
+multiple_p %>% 
+  filter(Role == "Product/Project Manager" | Role == "Manager") %>%
+  select(Role, value) %>%
+  group_by(Role, value) %>% count() %>%
+  ggplot(aes(x = value, y = n, fill = Role)) + geom_bar(stat="identity", position=position_dodge()) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+multiple_p %>% 
+  filter(Role == "Other") %>%
+  select(Role, value) %>%
+  group_by(Role, value) %>% count() %>%
+  ggplot(aes(x = value, y = n, fill = Role)) + geom_bar(stat="identity", position=position_dodge()) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+table(multiple_p[which(multiple_p$value=="I do not wish to disclose my approximate yearly compensation"), "Role"])/
+  sum(multiple_p$value=="I do not wish to disclose my approximate yearly compensation")
+  
+multiple_p <- multiple_p %>%
+  filter(!Role == "Other")
+
+## Student가 do not want to disclose my early compensation의 대부분을 차지한다. 거의 45%. 
+#developer advocate = head hunter? 개발자 영입자. 
+tb <- table(multiple_p$Role)/sum(table(multiple_p$Role))
+## 5% 미만 개체 전부 out : 
+tb
+tb[tb > 0.05]
+role <- c(names(tb[tb > 0.05]), "Business Analyst", "Data Engineer/DBA")
+
+multi_test <- multiple_p %>% 
+  filter(Role %in% role)
+table(multi_test$Role)
+
+#https://www.kaggle.com/andresionek/is-there-any-job-out-there-kaggle-vs-glassdoor
+## DS, SE, Statistician, Data Analyst, Engineer/DBA, Business Analyst
+## Other은 빼야겠다. 
+## Student는 일단 넣고 시작. 
+```
+
+* Not employed, data journalist : 제거, (journalist의 경우 너무 작은 proportion을 차지 =)
+* DBA/DataBase Engineer, Data Engineer => 합쳐서 Data Engineer/DBA로 교체
+* Statistician, Research Scientist => Statistician/Research Scientist로 합침. 
+* salesperson : Others로 묶음
+* Research_Assistant : 사실상 phD, 연구보조로 Students와 패턴이 유사하므로 묶어줌
+* Principal Investigator : 주로 교수님. 책임연구원. 다만 패턴이 학생과는 다르므로 남겨둠. 
+* Manager와 Product Manager묶기에도 패턴이 많이 다르다. 
+
+=> 이상패턴 : Student가 do not want to disclose my early compensation의 대부분을 차지한다. 거의 45%를 차지 .
+=> 이 이유로, 이후 분석에서 I do not want to disclose my yearly compensation observation을 제거하고 vs 제거하지 않고 fitting진행함. 
+
+* 이렇게 분류한 뒤에, Role들 중 개체 수가 전체의 5%에 미달하는 것들은 제거해 주었다. (너무 작은 개체수를 차지, Overfitting 경계), 다만 연봉 분류에 중요할 것이라 예상되는 "Business Analyst", "Data Engineer/DBA"의 경우 추가로 더해주었다. 
+
+(근거 : #https://www.kaggle.com/andresionek/is-there-any-job-out-there-kaggle-vs-glassdoor)
+
+
+## 8. drop other gender 
+
+```{r gender_drop, include=TRUE, message=FALSE}
+multi_test <- multi_test %>% 
+  filter(!Role %in% c("Prefer not to say", "Prefer to self-describe"))
+table(multi_test$Age)
+
+
+multi_test <- multi_test %>%
+  mutate_if(is_character, as.factor)
+
+```
+
+```{r experiment, include=TRUE, message=FALSE}
+## 실험 
+multi_test2 <- multi_test %>%
+  mutate(Language = str_c(Q16_Part_1, Q16_Part_2, Q16_Part_3, Q16_Part_4, Q16_Part_5, Q16_Part_6, Q16_Part_7, 
+                           Q16_Part_8, Q16_Part_9, Q16_Part_10, Q16_Part_11, Q16_Part_12, Q16_Part_13, Q16_Part_14,
+                           Q16_Part_15, Q16_Part_16, Q16_Part_17, Q16_Part_18, sep=""))
+sum(is.na(multi_test2$Language))
+q16.null.id <- multi_test2 %>% 
+  filter(Language == "") ## Nothing 
+
+multi_test2 <- multi_test %>%
+  mutate(Data = str_c(Q31_Part_1, Q31_Part_2, Q31_Part_3, Q31_Part_4, Q31_Part_5, Q31_Part_6, Q31_Part_7, 
+                          Q31_Part_8, Q31_Part_9, Q31_Part_10, Q31_Part_11, Q31_Part_12, sep=""))
+sum(is.na(multi_test2$Data))
+q31.null.id <- multi_test2 %>% 
+  filter(Data == "") ## Nothing 
+
+table(multiple_p$degree)
+```
+
+```{r move, include=TRUE, message=FALSE}
+write_csv(multi_test, "D:/project/ML_DS/multiple.csv", na="NA", append = FALSE, col_names = TRUE)
+
+```
+
+시간이 너무 오래 걸려서 여기서 데이터 만들어다 python으로 fitting 진행함. 
